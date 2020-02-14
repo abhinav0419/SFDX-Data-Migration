@@ -1,13 +1,16 @@
+# @author:      Shreya Bordia
+# @project:     ADT
+# @description: Migrate records for a set of objects from 1 sandbox to another
+#               using SFDX and CSV
+# @created:     27/12/2019
+
 import os
 import subprocess
-import sys
-import random
-import requests
 import json
-import collections
 import time
 import csv
-from subprocess import CalledProcessError 
+from subprocess import CalledProcessError
+from multiprocessing.dummy import Pool as ThreadPool #To-Do
 
 schemaFolder = "schema/"
 exportFolder = "export-"
@@ -16,206 +19,147 @@ orgFile = "orgList.json"
 objectListFile = "objectList.txt"
 mainPlan = "mainPlan.json"
 
-start = time.time()
-
-dictSchema = {}
-dictSobjectRecords = {}
 dictRefsToUpsert = {}
 dictIdsParentId = {}
-importIdsWithRef = {}
 originalRefMapping = {}
 
 listSObject = []
+listRefsRecords = []
+
+mapIdRef = {}
+mapSobjectLookupFields = {}
+mapSobjectRecords = {}
+#Giving Error | mapRefIdImportId = {}
+
 removeFields = [
+    "Id",
     "CreatedDate",
-    "LastModifiedDate"
+    "LastModifiedDate",
+    "Isbuildermodelhome__c",
+    "TimeZoneSidkey__c",
+    "SFFormattedTMZ__c"
 ]
 
 #--------------------------- SCHEMA ---------------------------#
 def getQuery(sobject):
-    isSelfLookup = False
+    mapSobjectLookupFields[sobject] = {}
 
     cmd_list = "sfdx force:schema:sobject:describe -u {0} --json -s {1}".format(srcOrg, sobject)
     schema = subprocess.check_output(cmd_list, shell=True)
-    dictSchema[sobject] = json.loads(schema.decode("UTF-8"))
-    
-    setJsonData(schemaFolder + sobject+".json", dictSchema[sobject])
+    mapSchema = json.loads(schema.decode("UTF-8"))["result"]
 
     query = "SELECT Id"
-    for field in dictSchema[sobject]["result"]["fields"]:
-        if field["createable"] and field["name"] not in removeFields:
-            if field["type"] == "reference" and field["referenceTo"][0] in listSObject:
-                query += "," + field["relationshipName"] + ".Id"
-            #To-Do | Owner - Name is same across orgs
-            elif field["type"] != "reference":
-                query += "," + field["name"]
+    for field in mapSchema["fields"]:
+        if field["createable"] and field["name"] not in removeFields and ((field["type"] == "reference" and field["referenceTo"][0] in listSObject) or (field["type"] != "reference")):
+            query += "," + field["name"]
 
-    #inner query of any object in object file
-    for child in dictSchema[sobject]["result"]["childRelationships"]:
-        if child["childSObject"] in listSObject:
-            if child["childSObject"] == sobject:
-                getParentRefs(sobject, child["field"])
-            else:
-                fieldAPI = child["field"].replace("__c", "__r.Id") if child["field"].endswith("__c") else child["field"].replace("Id", ".Id") 
-                query += ",(SELECT Id," + fieldAPI +" FROM "+ child["relationshipName"] +")"            
+        # get list of ref fields
+        if field["type"] == "reference" and field["referenceTo"][0] in listSObject:
+            mapSobjectLookupFields[sobject][field["name"]] = field["referenceTo"][0]
             
-    query += " FROM "+ sobject
-    #To-Do
-    query += " LIMIT 10000" 
-    
+    query += " FROM "+ sobject    
     print(sobject, "Query:", query)
-    print("--------------------------")
+    
     return query
-    
-def getParentRefs(sobject, lookupField):
-    query = "SELECT Id,"+lookupField+" FROM "+sobject
-    cmdList = "sfdx force:data:soql:query --json -u {0} -q \"{1}\"".format(srcOrg, query)
-    sobjectQuery = subprocess.check_output(cmdList, shell=True)
-    
-    records = json.loads(sobjectQuery.decode("UTF-8"))
-    dictIdsParentId[sobject] = []
-    
-    for record in records["result"]["records"]:
-        dictIdsParentId[sobject].append(record["Id"])
-
-    setJsonData("RefIds.json", dictIdsParentId)
 
 #--------------------------- EXPORT ---------------------------#
 def export(sobject):
     query = getQuery(sobject)
-    cmdList = "sfdx force:data:tree:export -u {0} -d {1} -p -q \"{2}\"".format(srcOrg, exportFolder + sobject, query)
+    cmdList = "sfdx force:data:soql:query -u {0} --json -q \"{1}\"".format(srcOrg, query)
     sobjectQuery = subprocess.check_output(cmdList, shell=True)
 
-#combine multiple child files to 1 object file
-def consolidateExports(sobject):
-    parentFolder = exportFolder + sobject
+    mapSobjectRecords[sobject] = json.loads(sobjectQuery.decode("UTF-8"))["result"]
 
-    for childFile in os.listdir(parentFolder):
-        childObject = childFile.split(".")[0][:-1]
-        
-        if childObject in listSObject and childObject != sobject:
-            updateFile(parentFolder +"/"+ childFile, sobject, childObject)
+#iterate each record and handle lookups
+def consolidateLookups(sobject):
+    recordRefs(sobject)
+    mapParentLookups(sobject)
 
-#map refids to actual ids in src
-def updateFile(srcPath, parentSObject, sobject):
-    destPath = exportFolder + sobject + "/" + sobject +"s.json" 
-    destData = dictSobjectRecords[sobject] if sobject in dictSobjectRecords else getJsonData(destPath)
+def recordRefs(sobject):
+    count = 1
 
-    consolidateSobjectIds(srcPath, destData, parentSObject, sobject)
-    dictSobjectRecords[sobject] = destData
+    for record in mapSobjectRecords[sobject]["records"]:
+        refId = sobject+"Ref"+ str(count)
+        record["attributes"]["referenceId"] = refId
+        mapIdRef[record["Id"]] = refId
 
-#move refs from other folders to its folder
-def consolidateSobjectIds(srcPath, destData, parentSObject, sobject):
-    for field in dictSchema[sobject]["result"]["fields"]:
-        if field["type"] == "reference" and field["referenceTo"][0] == parentSObject:
-            lookupField = field["name"]
-            lookupFieldRef = field["relationshipName"]    
-            break
+        del record["attributes"]["url"]
+        del record["Id"]
 
-    #map lookups with @ref
-    dictSrcIdRefs = {}
-    for record in getJsonData(srcPath)["records"]:
-        dictSrcIdRefs[record[lookupFieldRef]["Id"]] = record[lookupField]
+        for key, value in list(record.items()):
+            if value is None:
+                del record[key]
+
+        count += 1
+
+#To-Do | To update
+def mapParentLookups(sobject):
+    mapLookupFields = mapSobjectLookupFields[sobject]
     
-    #delete hardcoded ids
-    for record in destData["records"]:
-        if lookupFieldRef in record and record[lookupFieldRef]["Id"] in dictSrcIdRefs:
-            record[lookupField] = dictSrcIdRefs[record[lookupFieldRef]["Id"]]
-            del record[lookupFieldRef]
+    if len(mapLookupFields) > 0:
+        for record in mapSobjectRecords[sobject]["records"]:
+            hasChildAsParent = False
+            obj = {}
 
-            originalRefMapping[sobject].append(record)
+            for key, value in list(record.items()):
+                obj[key] = value
 
-#remove lookup if lookup object is in the below list
-def updateOneOnOneReference(sobject):
-    destPath = exportFolder + sobject + "/" + sobject +"s.json" 
-    destData = dictSobjectRecords[sobject] if sobject in dictSobjectRecords else getJsonData(destPath)
-    refFieldNames = []
+                if key in mapLookupFields:
+                    parentSobject = mapLookupFields[key]
 
-    for child in dictSchema[sobject]["result"]["fields"]:
-        if child["type"] == "reference" and containsParent(sobject, child["referenceTo"][0]):
-            refFieldNames.append(child["name"])
-        elif child["type"] == "reference" and child["referenceTo"][0] == sobject:
-            resolveSelfReference(sobject, child["name"], destData)
+                    if value in mapIdRef.keys():
+                        record[key] = "@" + mapIdRef[value]
+                    else:
+                        #when parent is below in listSobject
+                        hasChildAsParent = True
+                        del record[key]
 
-    #remove parent refs from file
-    if(len(refFieldNames) > 0) :
-        dictRefsToUpsert[sobject] = []
-
-        for record in destData["records"]:
-            for fieldName in refFieldNames:
-                if fieldName in record:                
-                    ###dictRefsToUpsert[sobject].append(record)
-                    originalRefMapping[sobject].append(record)
-                    
-                    del record[fieldName]
-
-    dictSobjectRecords[sobject] = destData
-    
-def resolveSelfReference(sobject, lookupField, destData):
-    lookupFieldRef = lookupField.replace("__c", "__r")
-
-    for record in destData["records"]:
-        if lookupFieldRef in record:
-            parentId = record[lookupFieldRef]["Id"]
-            index = dictIdsParentId[sobject].index(parentId)
-
-            record[lookupField] = "@" + sobject + "Ref" + str(index+1)
-            del record[lookupFieldRef]
-            originalRefMapping[sobject].append(record)
+            if hasChildAsParent:
+                listRefsRecords.append(obj)
             
-    setJsonData("Output.json", originalRefMapping[sobject])
-    
-    for record in destData["records"]:
-        if lookupField in record:
-            del record[lookupField]
-    
-    originalRefMapping[sobject] = getJsonData("Output.json")
+#can be multi-threaded                   
+def resolveChildAsParent():
+    if len(mapSobjectLookupFields) > 0 and len(listRefsRecords) > 0:
+        for record in listRefsRecords:
+            sobject = record["attributes"]["type"]
 
-def containsParent(sobject, parentSobject):
-    index = listSObject.index(sobject)
-    tempList = listSObject[index+1 : len(listSObject)]
-
-    return parentSobject in tempList
-
+            for field in mapSobjectLookupFields[sobject]:
+                if field in record:
+                    record[field] = "@" + mapIdRef[record[field]]
 
 #-------------------------- PLAN ---------------------------#
-def createPlan():
-    data = []
+def createPlan(sobject):
+    objRef = {}
+    objRef["sobject"] = sobject
+    objRef["saveRefs"] = True
+    objRef["resolveRefs"] = True
+    objRef["files"] = getFiles(sobject)
 
-    for sobjName in listSObject:
-        objRef = {}
-        objRef["sobject"] = sobjName
-        objRef["saveRefs"] = True
-        objRef["resolveRefs"] = True
-        objRef["files"] = getFiles(sobjName)
-
-        data.append(objRef)
-
-    setJsonData(mainPlan, data)
+    return objRef
 
 def getFiles(sobject):
     files = []
-    filePath = exportFolder + sobject + "/" + sobject +"s.json"
-    data = dictSobjectRecords[sobject] if sobject in dictSobjectRecords else getJsonData(filePath)
+    parentDir = exportFolder + sobject
+    filePath = parentDir + "/" + sobject +"s"
+    if parentDir not in os.listdir():
+        os.mkdir(parentDir)
 
-    print(sobject, "has", len(data["records"]), "records")
-    if len(data["records"]) > 200:
+    print(sobject, "has", len(mapSobjectRecords[sobject]["records"]), "records","\n------")
+    if len(mapSobjectRecords[sobject]["records"]) > 200:
         #write to multiple files
-        chunkData = list(chunkify(data["records"], 200))
+        chunkData = list(chunkify(mapSobjectRecords[sobject]["records"], 200))
         
         for i in range(len(chunkData)):
-            fileName = exportFolder + sobject + "/" + sobject +"s" + str(i) + ".json"
+            fileName = filePath + str(i) + ".json"
             tempDict = {}
-            
             tempDict["records"] = chunkData[i]
+            
             setJsonData(fileName, tempDict)
             files.append(fileName)
-    elif sobject in dictSobjectRecords:
-        setJsonData(filePath, data)
-        files.append(filePath)
     else:
-        files.append(filePath)
-
+        setJsonData(filePath +".json", mapSobjectRecords[sobject])
+        files.append(filePath +".json")
+    
     return files
 
 #divide into 200 blocks
@@ -224,39 +168,38 @@ def chunkify(records, chunk_size):
         yield records[i:i+chunk_size]
 
 #----------------------- IMPORT ------------------#
-def importData(dest_org):
-    cmdList = "sfdx force:data:tree:import --json -u {0} -p {1}".format(dest_org, mainPlan)
+def importData(destOrg):
+    cmdList = "sfdx force:data:tree:import --json -u {0} -p {1}".format(destOrg, mainPlan)
     recordIds = subprocess.check_output(cmdList, shell=True)
-    importIdsWithRef = json.loads(recordIds.decode("UTF-8"))
+    importRecords = json.loads(recordIds.decode("UTF-8"))
+
+    getImportedRecords(importRecords)
+
+# ------------------- CSV ---------------------- #
+def getImportedRecords(importRecords):
+    mapRefIdImportId = {}
+    for record in importRecords["result"]:
+        mapRefIdImportId[record["refId"]] = record["id"]
     
-    #To-Do
-    setJsonData("ImportedIds.json", importIdsWithRef)
+    # Print ids and refids 
+    setJsonData("ImportedIds.json", mapRefIdImportId)
+    setJsonData("ToUpdate.json", listRefsRecords)
 
 #create csv per object and upsert them
-def resolveLookups():
-    importIdsWithRef = getJsonData("ImportedIds.json")
-    mapSobjectImportIds = {}
-    for sobject in listSObject:
-        mapSobjectImportIds[sobject] = []
-    dictRefIdWithRecordId = {}
+def resolveLookups(sobject):
+    for record in listRefsRecords:
+        for attri in record.keys():
+            value = str(record[attri])
+            if value.startswith("@"):
+                record[attri] = mapRefIdImportId[value[1:]]
 
-    for record in importIdsWithRef["result"]:
-        dictRefIdWithRecordId["@"+ record["refId"]] = record["id"]
-        mapSobjectImportIds[record["type"]].append(record)
-    
-    #create csv sobject by sobject
-    for sobject in listSObject:
-        print("Calling replace refs")
-        replaceRefs(sobject, dictRefIdWithRecordId)
-        
-        if len(mapSobjectImportIds[sobject]) > 0 and sobject in originalRefMapping and len(originalRefMapping[sobject]) > 0:
-            toCSV(sobject, mapSobjectImportIds[sobject])
+    setJsonData("ToCSV.json", listRefsRecords)
 
 def replaceRefs(sobject, dictRefIdWithRecordId):
     print("In replace refs")
     refFieldNames = []
 
-    for child in dictSchema[sobject]["result"]["fields"]:
+    for child in mapSobjectSchema[sobject]["fields"]:
         if child["type"] == "reference" and child["referenceTo"][0] in listSObject:
             refFieldNames.append(child["name"])
 
@@ -265,7 +208,7 @@ def replaceRefs(sobject, dictRefIdWithRecordId):
             if fieldName in record and record[fieldName] in dictRefIdWithRecordId:
                 record[fieldName] = dictRefIdWithRecordId[record[fieldName]]
 
-def toCSV(sobject, importIds):
+def toCSV(sobject):
     csvFile = open(csvFolder + sobject + ".csv", "w+", newline="")
     csvWriter = csv.writer(csvFile)
     rows = []
@@ -326,16 +269,20 @@ def setJsonData(filePath, data):
 def execution_time(process_name):
     print("--------------------{0}-----------------------".format(process_name))
     print("It Took:  {0:0.1f} seconds".format(time.time() - start))
-   
-#dest orgs
-def destination_orgs():
-    return getJsonData(orgFile)["destOrg"]
+
+def setOrgs():
+    print("srcOrg", srcOrg, "listDestOrgs", listDestOrgs)
 
 #--------------------------MAIN EXECUTION---------------------------#
+start = time.time()
 
 #------ EXPORT ------#
 execution_time("Export Started")
-srcOrg = getJsonData(orgFile)["srcOrg"]
+
+#To-Do
+orgs = getJsonData(orgFile)
+srcOrg = orgs["srcOrg"]
+listDestOrgs = orgs["destOrgs"]
 
 with open(objectListFile, "r") as objListing:
     List = objListing.read().split("\n")
@@ -343,30 +290,33 @@ with open(objectListFile, "r") as objListing:
     for sobject in List:
         listSObject.append(sobject.strip())
 
-for sobject in reversed(listSObject):
-    originalRefMapping[sobject] = []
+# ------------------- MULTI-THREADING --------------------------- #
+#import concurrent.futures
+#with concurrent.futures.ThreadPoolExecutor(max_workers = len(listSObject)) as executor: 
+#    for sobject in listSObject:
+#        future = executor.submit(export, sobject) 
+
+planData = []
+for sobject in listSObject:
     export(sobject)
+    consolidateLookups(sobject)
+    planData.append(createPlan(sobject))
 
-for sobject in listSObject:
-    consolidateExports(sobject)
+#resolveChildAsParent()
 
-for sobject in listSObject:
-    updateOneOnOneReference(sobject)
+execution_time("Export finished")
+setJsonData(mainPlan, planData)
 
-setJsonData("Output.json", originalRefMapping)
-execution_time("Export Ended")
+#import
+execution_time("Import Started")
+for org in listDestOrgs:
+    importData(org)
+    execution_time("Import for " + org + " has finished")
 
-#------ PLAN ------#
-execution_time("Creating plan")
-createPlan()
-execution_time("Plan Created")
+#To-Do | print("mapRefIdImportId", len(mapRefIdImportId))
+mapRefIdImportId = getJsonData("ImportedIds.json")
 
-#------ IMPORT ------#
-for destOrg in getJsonData(orgFile)["destOrg"]:
-    execution_time("Importing has started for "+ destOrg)
-    importData(destOrg)
-    resolveLookups()
-    upsertRecords(destOrg)
-    execution_time("Importing has ended for "+ destOrg)
+for sobject in listSObject:    
+    resolveLookups(sobject)
 
 execution_time("*PROCESS FINISHED*")
