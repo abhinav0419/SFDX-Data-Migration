@@ -19,4 +19,4 @@ TerritoryAlerts__c
 TerritoryAssignment__c
 Trip_Fee__c
 Equifax_Mapping__c
-ScheduledUserTerr__c
+SchedUserTerr__c

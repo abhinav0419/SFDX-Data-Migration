@@ -9,12 +9,13 @@ import subprocess
 import json
 import time
 import csv
+import sys
 from subprocess import CalledProcessError
-from multiprocessing.dummy import Pool as ThreadPool #To-Do
+#To-Do | from multiprocessing.dummy import Pool as ThreadPool
 
 schemaFolder = "schema/"
 exportFolder = "export-"
-csvFolder = "csv/"
+csvFolder = "csv"
 orgFile = "orgList.json"
 objectListFile = "objectList.txt"
 mainPlan = "mainPlan.json"
@@ -25,11 +26,13 @@ originalRefMapping = {}
 
 listSObject = []
 listRefsRecords = []
-
 mapIdRef = {}
 mapSobjectLookupFields = {}
 mapSobjectRecords = {}
-#Giving Error | mapRefIdImportId = {}
+mapRefIdImportId = {}
+mapCSVRecords = {}
+
+limit = sys.argv[1] if len(sys.argv) > 1 else 0
 
 removeFields = [
     "Id",
@@ -50,16 +53,19 @@ def getQuery(sobject):
 
     query = "SELECT Id"
     for field in mapSchema["fields"]:
+        #only creatable fields
         if field["createable"] and field["name"] not in removeFields and ((field["type"] == "reference" and field["referenceTo"][0] in listSObject) or (field["type"] != "reference")):
             query += "," + field["name"]
 
-        # get list of ref fields
+        # map of lookupFieldName to ref sobject
         if field["type"] == "reference" and field["referenceTo"][0] in listSObject:
             mapSobjectLookupFields[sobject][field["name"]] = field["referenceTo"][0]
             
-    query += " FROM "+ sobject    
+    query += " FROM "+ sobject 
     print(sobject, "Query:", query)
-    
+    #for dev envr
+    query += " LIMIT " + limit if int(limit) > 0 else ""
+
     return query
 
 #--------------------------- EXPORT ---------------------------#
@@ -75,6 +81,8 @@ def consolidateLookups(sobject):
     recordRefs(sobject)
     mapParentLookups(sobject)
 
+#delete null refs
+#convert id to refNo
 def recordRefs(sobject):
     count = 1
 
@@ -86,13 +94,15 @@ def recordRefs(sobject):
         del record["attributes"]["url"]
         del record["Id"]
 
+        #remove null valued lookups
         for key, value in list(record.items()):
             if value is None:
                 del record[key]
 
         count += 1
 
-#To-Do | To update
+#To-Do
+#only parent has been queried, thus, map their @refNo
 def mapParentLookups(sobject):
     mapLookupFields = mapSobjectLookupFields[sobject]
     
@@ -109,15 +119,18 @@ def mapParentLookups(sobject):
 
                     if value in mapIdRef.keys():
                         record[key] = "@" + mapIdRef[value]
-                    else:
-                        #when parent is below in listSobject
+                    #when parent is below in listSobject
+                    elif parentSobject in listSObject:
                         hasChildAsParent = True
+                        del record[key]
+                    #when lookup has value but not in listSobject
+                    else:
                         del record[key]
 
             if hasChildAsParent:
                 listRefsRecords.append(obj)
             
-#can be multi-threaded                   
+#for sobject lower in the list, store locally in listRefsRecords                  
 def resolveChildAsParent():
     if len(mapSobjectLookupFields) > 0 and len(listRefsRecords) > 0:
         for record in listRefsRecords:
@@ -177,68 +190,73 @@ def importData(destOrg):
 
 # ------------------- CSV ---------------------- #
 def getImportedRecords(importRecords):
-    mapRefIdImportId = {}
     for record in importRecords["result"]:
         mapRefIdImportId[record["refId"]] = record["id"]
     
     # Print ids and refids 
     setJsonData("ImportedIds.json", mapRefIdImportId)
-    setJsonData("ToUpdate.json", listRefsRecords)
 
 #create csv per object and upsert them
 def resolveLookups(sobject):
+    if len(listRefsRecords) > 0:
+        for record in listRefsRecords:
+            for attri in record.keys():
+                value = str(record[attri])
+            
+                #skip @ --> [1:]
+                if value.startswith("@"):
+                    record[attri] = mapRefIdImportId[value[1:]]
+
+def setCSVRecords():
     for record in listRefsRecords:
-        for attri in record.keys():
-            value = str(record[attri])
-            if value.startswith("@"):
-                record[attri] = mapRefIdImportId[value[1:]]
+        sobject = record["attributes"]["type"]
+        mapCSVRecords[sobject].append(record)
 
-    setJsonData("ToCSV.json", listRefsRecords)
-
-def replaceRefs(sobject, dictRefIdWithRecordId):
-    print("In replace refs")
-    refFieldNames = []
-
-    for child in mapSobjectSchema[sobject]["fields"]:
-        if child["type"] == "reference" and child["referenceTo"][0] in listSObject:
-            refFieldNames.append(child["name"])
-
-    for record in originalRefMapping[sobject]:
-        for fieldName in refFieldNames:
-            if fieldName in record and record[fieldName] in dictRefIdWithRecordId:
-                record[fieldName] = dictRefIdWithRecordId[record[fieldName]]
-
+#for lookup below in the list, create csv and upsert
 def toCSV(sobject):
-    csvFile = open(csvFolder + sobject + ".csv", "w+", newline="")
-    csvWriter = csv.writer(csvFile)
-    rows = []
+    if csvFolder not in os.listdir():
+        os.mkdir(csvFolder)
 
-    #for header
-    header = ["Id"]
-    for recordRef in originalRefMapping[sobject]:
-        for attri in recordRef.keys():
-            if attri != "attributes" and attri not in header:
-                header.append(attri)
+    if len(mapCSVRecords[sobject]) > 0:
+        csvFile = open(csvFolder +"/" + sobject + ".csv", "w+", newline="")
+        csvWriter = csv.writer(csvFile)
+        rows = []
 
-    print("header", header)
-    csvWriter.writerow(header)
+        #for header
+        header = ["Id"]
+        for recordRef in mapCSVRecords[sobject]:
+            for attri in recordRef.keys():
+                if attri != "attributes" and attri not in header:
+                    header.append(attri)
 
-    #for row
-    for record in importIds:
-        for recordRef in originalRefMapping[sobject]:
-            if recordRef["attributes"]["referenceId"] == record["refId"]:
-                row = [record["id"]]
+        print("------header-----------", header)
+        csvWriter.writerow(header)
 
-                for attri in header:  
-                    if attri != "Id":                     
-                        if attri in recordRef:
-                            row.append(recordRef[attri])
+        #for row
+        for record in mapCSVRecords[sobject]:
+            row = []
+            recordRef = record["attributes"]["referenceId"]
+
+            if recordRef in mapRefIdImportId:
+                row.append(mapRefIdImportId[recordRef])
+
+                for attri in header[1:]:  
+                    if attri in record:
+                        value = str(record[attri])
+
+                        if value.startswith("@"):
+                            refId = value[1:]
+                            if refId in mapRefIdImportId:
+                                row.append(mapRefIdImportId[refId])
                         else:
-                            row.append("")
-                csvWriter.writerow(row)
-    
-    csvFile.close()
+                            row.append(value)                                
+                    else:
+                        row.append("")    
 
+                csvWriter.writerow(row)
+        csvFile.close()
+
+#bulk insert each csv file
 def upsertRecords(destOrg):
     for csvFile in os.listdir(csvFolder):
         sobject = csvFile.split(".")[0]
@@ -246,7 +264,7 @@ def upsertRecords(destOrg):
 
         print("Upserting for", sobject)
         
-        cmd_list = "sfdx force:data:bulk:upsert -u {0} --json -s {1} -f {2} -i Id".format(destOrg, sobject, csvFolder+csvFile)
+        cmd_list = "sfdx force:data:bulk:upsert -u {0} --json -s {1} -f {2} -i Id".format(destOrg, sobject, csvFolder + "/" + csvFile)
         upsertRecords = subprocess.check_output(cmd_list, shell=True)
         upsertJobIds[sobject] = json.loads(upsertRecords.decode("UTF-8"))
 
@@ -275,11 +293,10 @@ def setOrgs():
 
 #--------------------------MAIN EXECUTION---------------------------#
 start = time.time()
+execution_time("PROCESS STARTED")
 
 #------ EXPORT ------#
 execution_time("Export Started")
-
-#To-Do
 orgs = getJsonData(orgFile)
 srcOrg = orgs["srcOrg"]
 listDestOrgs = orgs["destOrgs"]
@@ -292,7 +309,7 @@ with open(objectListFile, "r") as objListing:
 
 # ------------------- MULTI-THREADING --------------------------- #
 #import concurrent.futures
-#with concurrent.futures.ThreadPoolExecutor(max_workers = len(listSObject)) as executor: 
+#with concurrent.futures.ThreadPoolExecutor(max_workers = len(listSObject)) as cd executor: 
 #    for sobject in listSObject:
 #        future = executor.submit(export, sobject) 
 
@@ -302,10 +319,12 @@ for sobject in listSObject:
     consolidateLookups(sobject)
     planData.append(createPlan(sobject))
 
-#resolveChildAsParent()
-
 execution_time("Export finished")
+
+setJsonData('mapIdRef.json', mapIdRef)
+resolveChildAsParent()
 setJsonData(mainPlan, planData)
+setJsonData('listRefsRecords.json', listRefsRecords)
 
 #import
 execution_time("Import Started")
@@ -313,10 +332,17 @@ for org in listDestOrgs:
     importData(org)
     execution_time("Import for " + org + " has finished")
 
-#To-Do | print("mapRefIdImportId", len(mapRefIdImportId))
-mapRefIdImportId = getJsonData("ImportedIds.json")
+    execution_time("CSV Started")
+    for sobject in listSObject:    
+        resolveLookups(sobject)
+        mapCSVRecords[sobject] = []
+    
+    setCSVRecords()
+    
+    for sobject in listSObject:    
+        toCSV(sobject)
 
-for sobject in listSObject:    
-    resolveLookups(sobject)
+    upsertRecords(org)
+    execution_time("CSV Finished")
 
 execution_time("*PROCESS FINISHED*")
