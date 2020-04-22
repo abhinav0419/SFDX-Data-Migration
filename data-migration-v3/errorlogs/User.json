@@ -1,0 +1,6 @@
+[
+    {
+        "message": "Nested object for polymorphic foreign key must have an attributes field before any other fields.",
+        "errorCode": "JSON_PARSER_ERROR"
+    }
+]

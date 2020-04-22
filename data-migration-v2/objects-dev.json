@@ -1,0 +1,47 @@
+[
+    {
+        "name" : "Affiliate__c"
+    },
+    {
+        "name" : "DNIS__c",
+        "whereClause" : "Name='1113335555'",
+        "limit" : "1"
+    },
+    {
+        "name" : "APNVDN__c"
+    },
+    {
+        "name" : "Call_Disposition__c"
+    },
+    {
+        "name" : "Equifax_Mapping__c"
+    },
+    {
+        "name" : "Lead_Convert__c",
+        "whereClause" : "Description__c='Default'",
+        "limit" : "1"
+    },
+    {
+        "name" : "LeadSharingCriteria__c"
+    },
+    {
+        "name" : "PartnerConfiguration__c"
+    },
+    {
+        "name" : "Postal_Codes__c",
+        "whereClause" : "Name='33431'"
+    },
+    {
+        "name" : "Town__c"
+    },
+    {
+        "name" : "ProfileQuestion__c"
+    },
+    {
+        "name" : "Serviceability__c",
+        "whereClause" : "Active__c=true"
+    },
+    {
+        "name" : "Trip_Fee__c"
+    }
+]

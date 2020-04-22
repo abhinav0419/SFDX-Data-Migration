@@ -1,6 +1,4 @@
 {
-    "srcOrg" : "shreyabordia@adt.com.test3",
-    "destOrgs": [
-        "shreyabordia@adt.com.adtshreya"
-    ]
+    "srcOrg" : "shreyabordia@adt.com.dev2",
+    "destOrg": "shreyabordia@adt.com.adtshreya"
 }

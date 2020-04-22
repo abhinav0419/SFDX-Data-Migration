@@ -1,0 +1,73 @@
+[
+    {
+        "name" : "Affiliate__c"
+    },
+    {
+        "name" : "APNVDN__c"
+    },
+    {
+        "name" : "DNIS__c",
+        "whereClause" : "Business_segment__c!='Ecommerce'"
+    },
+    {
+        "name" : "Call_Disposition__c"
+    },
+    {
+        "name" : "Call_Script__c"
+    },
+    {
+        "name" : "Equifax_Mapping__c"
+    },
+    {
+        "name" : "Lead_Convert__c"
+    },
+    {
+        "name" : "LeadSharingCriteria__c"
+    },
+    {
+        "name" : "ManagerTown__c"
+    },
+    {
+        "name" : "Package__c"
+    },
+    {
+        "name" : "PartnerConfiguration__c"
+    },
+    {
+        "name" : "Permit__c"
+    },
+    {
+        "name" : "Postal_Codes__c"
+    },
+    {
+        "name" : "Town__c"
+    },
+    {
+        "name" : "ProfileQuestion__c"
+    },
+    {
+        "name" : "Promo_Package__c"
+    },
+    {
+        "name" : "Promotion__c"
+    },
+    {
+        "name" : "SchedUserTerr__c"
+    },
+    {
+        "name" : "Serviceability__c",
+        "whereClause" : "Active__c=true"
+    },
+    {
+        "name" : "Territory__c"
+    },
+    {
+        "name" : "TerritoryAssignment__c"
+    },
+    {
+        "name" : "TerritoryAlerts__c"
+    },
+    {
+        "name" : "Trip_Fee__c"
+    }
+]

@@ -1,0 +1,12 @@
+Affiliate__c
+APNVDN__c
+DNIS__c
+Lead_Convert__c
+Permit__c
+Town__c
+Postal_Codes__c
+SchedUserTerr__c
+Territory__c
+TerritoryAssignment__c
+CustomerWebQuestion__c
+User_Appointment_Count__c
